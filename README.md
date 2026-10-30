@@ -1,102 +1,106 @@
-# 合併「健康」App 重複的裝置來源
+# Merge duplicate device sources in Apple Health
 
-換過幾支 iPhone 或 Apple Watch 之後，「健康」App 的「來源」列表會留下一堆舊裝置。個人資料頁的「裝置」也會出現很多個 iPhone 和 Apple Watch，因為裝置每換一次系統版本，就會多一筆硬體紀錄。App 裡只能「刪除所有資料」，沒辦法保留資料、只把裝置合併。
+English | [繁體中文](README_zh.md)
 
-這裡的兩支腳本會直接修改「健康」的資料庫，把舊裝置的紀錄併到目前的裝置上，**不刪除任何健康紀錄**。資料庫要從 iPhone 的加密備份取出，修改後放回備份，再還原到手機。下面以 [iMazing](https://imazing.com/) 說明操作方式。
+After a few iPhone or Apple Watch upgrades, the Health app's Sources list can fill up with old devices. The Devices page in your profile can also show many entries for the same iPhone or Apple Watch, because each OS update creates another hardware record. The app lets you delete all data from a device, but it doesn't let you merge devices while keeping their data.
 
-| 檔案 | 用途 |
+These two scripts modify the Health databases directly to move records from old devices to your current ones, **without deleting any health records**. You need to extract the databases from an encrypted iPhone backup, put the modified files back into the backup, then restore it to your phone. The instructions below use [iMazing](https://imazing.com/).
+
+| File | Purpose |
 | --- | --- |
-| `merge_health_sources.py` | 合併「來源」：舊 iPhone 的紀錄併入目前的 iPhone，舊 Apple Watch 的紀錄併入目前的手錶 |
-| `prune_empty_devices.py` | 清理「裝置」頁：刪除沒有資料的硬體紀錄；加上 `--collapse` 時，所有 iPhone / Apple Watch 資料的硬體紀錄都改成目前裝置 |
+| `merge_health_sources.py` | Merge sources: move old iPhone records to your current iPhone, and old Apple Watch records to your current watch |
+| `prune_empty_devices.py` | Clean up the Devices page: remove hardware records with no data; with `--collapse`, change the hardware references for all iPhone / Apple Watch data to the current devices |
 
-只用到 Python 3 標準函式庫，不需要安裝其他套件。
+Both scripts use only the Python 3 standard library. No additional packages are needed.
 
-## 開始之前
+## Before you start
 
-- **這是非官方做法。** 資料庫結構沒有公開文件，Apple 隨時可能改變，改錯也可能讓「健康」資料庫損壞。請保留一份沒動過的原始備份，出問題時用它還原。目前只在 iOS 27 的資料庫上測試過。
-- **一定要用加密備份。** 未加密的備份不會包含健康資料。
-- **先關閉 iCloud 的「健康」同步，並刪除 iCloud 上的健康資料。** 如果其他裝置（例如 iPad）也開著健康同步，也一起關閉。否則改好的資料可能和雲端的舊資料互相同步。確認手機上的結果正確後，再重新開啟同步。
-- **還原會讓手機回到備份當下的狀態。** 從做備份到還原完成之間，手機上新增的所有資料都會消失，不只是健康資料。整個流程請盡量一次做完。
-- 所有腳本都以唯讀方式開啟原始檔，只修改 `--out` 資料夾裡的複本。`--out` 指定的資料夾必須不存在。
+- **This is an unofficial method.** The database schema is undocumented and Apple may change it at any time. Incorrect changes can corrupt your Health databases. Keep an untouched original backup so you can restore it if anything goes wrong. These scripts have only been tested with iOS 27 databases.
+- **Use an encrypted backup.** Unencrypted backups do not contain health data.
+- **Turn off iCloud sync for Health and delete the health data stored in iCloud first.** Turn off Health sync on other devices, such as an iPad, too. Otherwise, the modified data may sync with the old cloud data. Turn sync back on only after checking the results on your phone.
+- **Restoring returns your phone to its state at the time of the backup.** Any data added to the phone between the backup and the restore will be lost, not just health data. Try to complete the entire process in one session.
+- The scripts open the original files read-only and modify only copies in the `--out` directory. The output directory must not already exist.
 
-## 怎麼決定「目前的裝置」
+## How the current devices are selected
 
-| 項目 | 預設判斷方式 | 手動指定 |
+| Item | Default selection | Manual override |
 | --- | --- | --- |
-| 目前的 iPhone | 資料庫標記為本機（`sources.local_device`）的裝置 | `--iphone-target` |
-| 目前的 Apple Watch | 最後配對的手錶（`nano_pairing` 的最後一筆） | `--watch-target` |
-| 存放重疊資料的來源 | 同類型舊裝置中紀錄最多的那一台，會改名為「舊 iPhone」或「舊 Apple Watch」 | `--iphone-legacy`、`--watch-legacy` |
+| Current iPhone | The device marked as local in the database (`sources.local_device`) | `--iphone-target` |
+| Current Apple Watch | The most recently paired watch (the last entry in `nano_pairing`) | `--watch-target` |
+| Source for overlapping data | The old device of the same type with the most records, renamed to `Old iPhone` or `Old Apple Watch` | `--iphone-legacy`, `--watch-legacy` |
 
-預覽會列出每台裝置的 `lid`、名稱、型號、紀錄數和最後一筆資料的日期，並註明目標是「自動判斷」還是「手動指定」。判斷錯的話，可以用列表上的 `lid` 指定，例如 `--watch-target 12`；也可以用 `com.apple.health.<UUID>` 形式的 bundle ID。不想合併的裝置，用 `--keep` 排除，可以重複指定。
+The preview lists each device's `lid`, name, model, record count, and date of its most recent data. It also shows whether the target was detected automatically or specified manually. If the selection is wrong, use a `lid` from the list, such as `--watch-target 12`, or a bundle ID in the form `com.apple.health.<UUID>`. Use `--keep` to exclude a device from merging; you can repeat this option.
 
-### 為什麼會有「舊 iPhone」和「舊 Apple Watch」
+### Why keep Old iPhone and Old Apple Watch sources?
 
-如果兩台裝置在同一時段都有紀錄，把這些紀錄全部併進同一個來源，步數、距離這類累計值就會重複加總。例如換錶那幾天兩支錶都戴著，或是出門時同時帶著兩支手機，兩支都在記錄步數，再透過 iCloud 同步到同一個「健康」資料庫。所以和其他裝置時間重疊的紀錄不會併入目標，而是改放到「舊 iPhone」或「舊 Apple Watch」。不同來源之間的重疊，「健康」會依來源優先順序處理，不會重複計算。
+If two devices recorded data during the same period, moving everything into one source could double-count cumulative values such as steps and distance. For example, you might wear both watches for a few days when switching to a new one, or carry two phones that both record steps and sync to the same Health database through iCloud. Records that overlap with another device's records are therefore moved to the Old iPhone or Old Apple Watch source instead of the target. Health handles overlaps between separate sources according to source priority, rather than counting them twice.
 
-**這兩個來源存的是真實紀錄，在「健康」App 裡刪除之前請謹慎考慮。** 在「來源」或「裝置」頁按「刪除所有資料」，會永久刪除該項目底下的所有紀錄。
+**These sources contain real health records. Think carefully before deleting them in Health.** Choosing Delete All Data on a source or device permanently deletes all records under that entry.
 
-## 操作步驟
+The scripts' output and default legacy source names are in English. To use different source names, pass `--iphone-legacy-name` and `--watch-legacy-name` when running `merge_health_sources.py`.
 
-### 1. 用 iMazing 取出資料庫
+## Instructions
 
-1. 在 iMazing 的裝置設定中開啟備份加密（Backup Encryption），然後替 iPhone 做一份新備份。
-2. 在「Backups」選取這份備份，按「Create an Editable Copy of this Backup」，建立可編輯副本。原本的備份保持不動，出問題時可以用它還原。
-3. 打開可編輯副本的「File System」，進入 `HealthDomain/Health/`。
-4. 把 `healthdb.sqlite`、`healthdb_secure.sqlite` 複製到電腦的同一個資料夾，例如 `backup/`。如果有 `healthdb.sqlite-wal` 或 `healthdb_secure.sqlite-wal`，也一起複製。腳本會先把 `-wal` 裡尚未寫入的內容併入資料庫。
+### 1. Extract the databases with iMazing
 
-### 2. 執行腳本
+1. Enable Backup Encryption in iMazing's device settings, then make a new backup of your iPhone.
+2. Select that backup under Backups and choose Create an Editable Copy of this Backup. Keep the original backup untouched so you can restore it if needed.
+3. Open File System in the editable copy and go to `HealthDomain/Health/`.
+4. Copy `healthdb.sqlite` and `healthdb_secure.sqlite` to the same directory on your computer, such as `backup/`. If `healthdb.sqlite-wal` or `healthdb_secure.sqlite-wal` exists, copy it too. When applying changes, the scripts first checkpoint any pending changes in the `-wal` files into the databases.
 
-每個指令都先執行一次預覽，確認內容後，再加上 `--apply` 產生修改後的複本。
+### 2. Run the scripts
+
+Run each command as a preview first. Check the plan, then add `--apply` to create the modified copies.
 
 ```sh
-# 合併來源
+# Merge sources
 python3 -B merge_health_sources.py --src backup --out merged
 python3 -B merge_health_sources.py --src backup --out merged --apply
 
-# 清理裝置（不需要的話可以跳過，直接使用 merged/）
+# Clean up devices (optional; skip this and use merged/ if not needed)
 python3 -B prune_empty_devices.py --src merged --out final --collapse
 python3 -B prune_empty_devices.py --src merged --out final --collapse --apply
 ```
 
-- 每次 `--apply` 都會自動驗證，最後一行必須是「全部驗證通過。」。只要出現 `[FAIL]`，就不要使用這份輸出。
-- 如果 `prune_empty_devices.py` 顯示「沒有需要清理的裝置紀錄，未產生輸出。」，表示不需要清理，下一步改用 `merged/`。
-- 合併時如果出現「仍在 nano_pairing（手錶配對紀錄）中」的警告，請確認那些舊手錶已經在 Watch App 解除配對。解除配對後，舊的配對紀錄仍可能留在資料庫裡，這種情況可以繼續。
-- 不加 `--collapse` 時，`prune_empty_devices.py` 只會刪除沒有資料的硬體紀錄。加上 `--collapse` 後，舊資料原本記錄的型號和系統版本會改成目前裝置，**無法復原**。
+- Each `--apply` run automatically validates its output. The final line must be `All checks passed.` If any check shows `[FAIL]`, do not use that output.
+- If `prune_empty_devices.py` prints `No device records to clean up; no output created.`, use `merged/` in the next step instead.
+- If the merge warns that an old watch `is still in nano_pairing (watch pairing records)`, confirm that you have unpaired it in the Watch app. Old pairing records can remain after unpairing; you can continue in that case.
+- Without `--collapse`, `prune_empty_devices.py` only removes hardware records with no data. With `--collapse`, the model and OS version recorded for old data are replaced with those of the current devices. **This cannot be undone in the modified copy.**
 
-驗證項目包括：
+Validation includes:
 
-- 各資料表的紀錄筆數不變。
-- 各種數值資料的總和不變。
-- 每個來源的紀錄筆數符合預期。
-- 沒有紀錄指向不存在的來源或硬體紀錄。
-- 合併後的目標來源內，不同裝置之間沒有時間重疊。
-- SQLite 的 `quick_check` 和 `foreign_key_check` 都正常。
+- Unchanged record counts in the checked data tables.
+- Unchanged totals for each type of numeric data.
+- Expected record counts for each source.
+- No records pointing to missing sources or hardware records.
+- No time overlaps between different devices within the merged target source.
+- SQLite `quick_check` and `foreign_key_check` checks.
 
-### 3. 放回備份並還原到手機
+### 3. Put the files back and restore your phone
 
-1. 在可編輯副本的 `HealthDomain/Health/` 中，用輸出資料夾（`final/` 或 `merged/`）裡的 `healthdb.sqlite`、`healthdb_secure.sqlite` 覆蓋原本的檔案。
-2. 刪除同一個資料夾裡的 `healthdb.sqlite-wal`、`healthdb.sqlite-shm`、`healthdb_secure.sqlite-wal`、`healthdb_secure.sqlite-shm`。這些是修改前的資料庫留下的暫存檔，留著的話可能讓新的資料庫損壞。
-3. 用 iMazing 把這份可編輯副本還原（Restore）到 iPhone。手機開著「尋找」時，iMazing 會要求先關閉；也需要輸入備份密碼。
-4. 還原完成後，打開「健康」App 確認：
-   - 「來源」只剩目前的裝置，以及「舊 iPhone」、「舊 Apple Watch」。
-   - 「裝置」頁只剩目前的 iPhone、Apple Watch 和其他配件（例如 AirPods）。
-5. 確認沒問題後，再開啟 iCloud 的「健康」同步。
+1. In the editable backup's `HealthDomain/Health/` directory, replace `healthdb.sqlite` and `healthdb_secure.sqlite` with the files from your output directory (`final/` or `merged/`).
+2. Delete `healthdb.sqlite-wal`, `healthdb.sqlite-shm`, `healthdb_secure.sqlite-wal`, and `healthdb_secure.sqlite-shm` from that same directory. These files belong to the databases before modification; leaving them in place could corrupt the new databases.
+3. Use iMazing to restore the editable backup to your iPhone. If Find My is enabled, iMazing will ask you to turn it off. You will also need the backup password.
+4. After restoring, open Health and check that:
+   - Sources contains only your current devices and the Old iPhone / Old Apple Watch sources.
+   - Devices contains only your current iPhone, Apple Watch, and other accessories, such as AirPods.
+5. Once everything looks correct, turn iCloud sync for Health back on.
 
-如果結果不對，用第 1 步保留的原始備份還原，手機就會回到修改前的狀態。
+If the results are wrong, restore the untouched original backup from step 1 to return your phone to its state before the changes.
 
-## 建議做法
+## Recommended workflow
 
-1. 依照上面的步驟整理一次。
-2. 之後不需要記錄的裝置（例如備用手機），先關閉那台裝置的 iCloud「健康」同步，再刪除它本機的健康資料。順序不能反過來：同步還開著時刪除，iCloud 和其他裝置上的資料也會一起被刪掉。
-3. 還在使用、想保留為獨立來源的裝置，執行腳本時用 `--keep` 排除。
-4. 之後如果又出現多個裝置來源，再用這兩支腳本處理一次。
+1. Follow the steps above to clean up your existing data.
+2. For a device you no longer want to record data, such as a spare phone, turn off its iCloud sync for Health before deleting its local health data. Do not reverse this order: deleting data while sync is still on also deletes it from iCloud and your other devices.
+3. Use `--keep` for any devices you still use and want to retain as separate sources.
+4. Run the scripts again if duplicate device sources build up later.
 
-## 已知限制
+## Known limitations
 
-- 只處理 Apple 的 iPhone 和 Apple Watch 裝置來源（`com.apple.health.<UUID>`）。App 寫入的來源和 AirPods 等配件不會改動。
-- 同時配對多支手錶時，自動判斷會選最後配對的那一支。請在預覽時確認目標是否正確。
-- 之後每次更新 iOS 或 watchOS，系統仍會新增一筆硬體紀錄。「裝置」頁的項目又變多時，可以再執行一次 `prune_empty_devices.py`。
+- Only Apple iPhone and Apple Watch device sources (`com.apple.health.<UUID>`) are processed. Sources written by apps and accessories such as AirPods are left unchanged.
+- If multiple watches are paired, automatic selection picks the most recently paired one. Check the target in the preview.
+- Each iOS or watchOS update can still create another hardware record. Run `prune_empty_devices.py` again if the Devices page fills up.
 
-## 使用風險
+## Disclaimer
 
-這個專案與 Apple 和 iMazing 都沒有關係。修改系統資料庫有一定風險，請自行評估，並確實保留原始備份。
+This project is not affiliated with Apple or iMazing. Modifying system databases carries a risk of data loss or corruption. Use your own judgment and keep an untouched original backup.
