@@ -1,0 +1,6 @@
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.log
+__pycache__/
+.DS_Store
