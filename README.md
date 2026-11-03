@@ -32,8 +32,9 @@ The process is: extract the Health databases from an encrypted iPhone backup →
 | `list_health_sources.py` | **View**: list the sources and devices in the databases and how many records each one has | No, it only reads |
 | `merge_health_sources.py` | **Merge sources**: move old iPhone records to your current iPhone, and old Apple Watch records to your current watch | Only the copies in the `--out` directory |
 | `prune_empty_devices.py` | **Clean up the Devices page**: remove hardware records with no data (optional) | Only the copies in the `--out` directory |
+| `compare_health_dbs.py` | **Verify**: compare the original databases with the result, confirm that no health records were lost or changed, and list everything else that changed | No, it only reads |
 
-Order of use: **view first → then merge → then clean up if needed**.
+Order of use: **view first → then merge → then clean up if needed → finally compare with the original**.
 
 The scripts use only what comes with Python 3. No extra packages are needed. Type `python3 --version` in Terminal; if it prints a version number, you're ready.
 
@@ -77,9 +78,10 @@ Check each item:
 | 3 | Preview the merge → check it → apply it to create `merged/` | `merge_health_sources.py` |
 | 4 | Check the merged result | `list_health_sources.py` |
 | 5 | (Optional) Preview the cleanup → check it → apply it to create `final/` | `prune_empty_devices.py` |
-| 6 | Put the modified files back into the backup and delete the old temporary files | iMazing |
-| 7 | Restore the backup to your phone | iMazing |
-| 8 | Check the results on your phone, then turn iCloud sync back on | iPhone |
+| 6 | Compare the result with the original and confirm no health records changed | `compare_health_dbs.py` |
+| 7 | Put the modified files back into the backup and delete the old temporary files | iMazing |
+| 8 | Restore the backup to your phone | iMazing |
+| 9 | Check the results on your phone, then turn iCloud sync back on | iPhone |
 
 ## Step-by-step instructions
 
@@ -99,6 +101,7 @@ iCloud-Health-Device-Cleanup/
 ├── backup/
 │   ├── healthdb.sqlite
 │   └── healthdb_secure.sqlite
+├── compare_health_dbs.py
 ├── list_health_sources.py
 ├── merge_health_sources.py
 └── prune_empty_devices.py
@@ -139,6 +142,7 @@ Check these things in the output:
 - Is the device after `Target:` the one you **use now**? If not, choose it with `--iphone-target` or `--watch-target`.
 - The table below it lists the old devices that **will be merged**. Is there one you want to keep? If so, exclude it with `--keep`.
 - The `To legacy` column shows how many overlapping records will go to `Old iPhone` or `Old Apple Watch`.
+- `Source priority:` shows how many of the old devices' places in the source priority lists (Data Sources & Access for each data type) move to the target. Where the target is already listed, it keeps its own place and the old device's entry is dropped.
 
 If something is wrong, add options and preview again until it looks right. See [All options](#all-options) and [Common situations and examples](#common-situations-and-examples).
 
@@ -150,6 +154,8 @@ python3 -B merge_health_sources.py --src backup --out merged --apply
 
 Wait for it to finish. **The last line must be `All checks passed.`** If you see any `[FAIL]`, do not use this output.
 
+The output files may be smaller than the originals. After applying, the script returns unused space inside the databases to the file system, as the Health app does itself. This removes no data.
+
 ### Step 4: Check the merged result
 
 ```sh
@@ -160,7 +166,7 @@ Check that the old devices are gone and their records were added to the target d
 
 ### Step 5: Clean up the Devices page (optional)
 
-You can skip this step. If you do, use the files in `merged/` in step 6.
+You can skip this step. If you do, use `merged/` instead of `final/` in the following steps.
 
 First, look at the hardware records:
 
@@ -190,28 +196,45 @@ Before using `--collapse`:
 - **`--collapse` ignores `--keep` from the merge.** If you kept an iPhone or Apple Watch with `--keep` in step 3, its hardware records will also be changed to the target device's model. In that case, it's best not to use `--collapse`.
 - If you used `--iphone-target` or `--watch-target` in step 3, add **the same options** here. Otherwise, the script detects the current devices on its own and may pick a different one.
 
-Again, the last line of an `--apply` run must be `All checks passed.` If it prints `No device records to clean up; no output created.`, there is nothing to clean up; use `merged/` in step 6.
+Again, the last line of an `--apply` run must be `All checks passed.` If it prints `No device records to clean up; no output created.`, there is nothing to clean up; use `merged/` in the following steps.
 
-### Step 6: Put the files back into the backup
+### Step 6: Compare with the original
+
+Compare the original databases in `backup/` with the final result (`final/`, or `merged/` if you skipped step 5):
+
+```sh
+python3 -B compare_health_dbs.py --before backup --after final
+```
+
+This only reads both directories and may take a minute. Check the output:
+
+- Under `=== Health records ===`, every check must be `[OK]`, and **the last line must be `All health records are unchanged.`** This means every health record is still there with the same contents, and the record count and total of each data type are unchanged.
+- `Records moved to another source` shows which sources records moved from and to, with record counts. It should only show the moves you planned: from old devices to your current devices, or to `Old iPhone` / `Old Apple Watch`. `Records moved to another hardware record` shows hardware changes, such as those made by `--collapse` or `--relink`.
+- `=== Other changes ===` lists what changed besides health records: deleted or renamed sources, removed hardware records, and how many rows were removed, added, or changed in each table. `cached_queries`, `sample_aggregate_caches`, and `sleep_day_summary_cache` are caches the Health app rebuilds by itself. `data_provenances` records which source and device each record came from, and `logical_source_order` is the source priority order.
+
+If you see any `[FAIL]`, do not use this output. You can compare any two directories, such as `--before backup --after merged`.
+
+### Step 7: Put the files back into the backup
 
 1. In iMazing, open `HealthDomain/Health/` in the editable copy.
 2. **Replace** the existing `healthdb.sqlite` and `healthdb_secure.sqlite` with the ones from your output directory:
    - If you did step 5, use the files in `final/`.
    - If you skipped step 5, or step 5 created no output, use the files in `merged/`.
 
-### Step 7: Restore to your phone
+### Step 8: Restore to your phone
 
 Use iMazing to restore the editable copy to your iPhone.
 
 - If Find My is on, iMazing will ask you to turn it off first.
 - You will need the backup password.
 
-### Step 8: Check on your phone
+### Step 9: Check on your phone
 
 Open Health and check that:
 
 - The sources list contains only your current devices, devices you kept with `--keep`, and `Old iPhone` / `Old Apple Watch` (these appear only when there were overlapping records).
 - If you used `--collapse` in step 5: the Devices page contains only your current iPhone, Apple Watch, and other accessories such as AirPods. Without `--collapse`, hardware records for older models stay as long as they still have data. That is normal.
+- In Data Sources & Access for a few data types, your current devices are where your old devices used to be in the priority list, or in their own place if they were already listed.
 
 Once everything looks correct, turn iCloud sync for Health back on.
 
@@ -265,6 +288,13 @@ python3 -B list_health_sources.py --src merged --hardware --devices  # only iPho
 | `--relink OLD=NEW` | Optional, repeatable | Move data from hardware record OLD to the existing record NEW, for example `--relink 165=184`. OLD can be a record that no longer exists but is still referenced by data (listed in the `[WARNING]` at the end of `list_health_sources.py --hardware`), or an existing record, to combine several records for the same device (such as one pair of AirPods) into one. An existing OLD has no data afterwards and is removed; **its model and firmware details are lost and cannot be restored**. The preview shows both sides' name, model, firmware, and creation date, plus the record count and first and latest record dates; check that each pair is the same device before applying. Point every OLD directly to the record you want to keep. | This data is left unchanged |
 | `--iphone-target DEVICE` | Optional | Your **current iPhone**. Only used with `--collapse`. Use the same value as in the merge. | The iPhone marked as local in the database |
 | `--watch-target DEVICE` | Optional | Your **current Apple Watch**. Only used with `--collapse`. Use the same value as in the merge. | The most recently paired watch |
+
+### `compare_health_dbs.py` (verify, changes nothing)
+
+| Option | Required? | Description |
+| --- | --- | --- |
+| `--before DIR` | Required | Directory with the original databases, usually `backup`. |
+| `--after DIR` | Required | Directory with the result to check, such as `final` or `merged`. |
 
 ## Common situations and examples
 
@@ -344,7 +374,7 @@ The original `backup/` is never changed, so you can reuse it as many times as yo
 | `[WARNING] ... is still in nano_pairing ...` | A watch being merged still has a pairing record. | Confirm you unpaired it in the Watch app. If you did, you can continue; old records often remain after unpairing. If you still use that watch, keep it with `--keep`. |
 | `iPhone: no old devices to merge` or `Apple Watch: no old devices to merge` | There are no old devices of this type to merge. | Nothing to do. |
 | `No devices to merge; no output created.` | There was nothing to merge, so no output was created. | Nothing to do. |
-| `No device records to clean up; no output created.` | `prune_empty_devices.py` found no hardware records to clean up. | Use `merged/` in step 6. |
+| `No device records to clean up; no output created.` | `prune_empty_devices.py` found no hardware records to clean up. | Use `merged/` in the following steps. |
 | `Cannot detect the current iPhone; specify --iphone-target ...` (or Apple Watch) | The script can't tell which device you use now. | Find the lid with `list_health_sources.py --devices`, then pass it with `--iphone-target` or `--watch-target`. |
 | `Invalid target or legacy source for ...` | The target or the source for overlapping records is invalid. For example, the device type doesn't match, the target and that source are the same device, or that source was excluded with `--keep`. | Check the lids you passed to `--*-target`, `--*-legacy`, and `--keep`. |
 | `No source found for lid ...` | The lid you passed doesn't exist. | Look it up again with `list_health_sources.py`. |
@@ -352,6 +382,10 @@ The original `backup/` is never changed, so you can reuse it as many times as yo
 | `FileExistsError: ...` | The `--out` directory already exists. | Delete it or choose another name. |
 | `Stopped: ... conflicting derived_flags ...` | The cleanup found data it can't combine safely. It stopped and created no output. | Clean up without `--collapse`, or skip step 5. |
 | `[WARNING] Data references ... missing hardware records ...` | Some data references hardware records that no longer exist. | Use the listed dates to find the matching existing hardware records, then repair with `prune_empty_devices.py --relink OLD=NEW`. |
+| `All health records are unchanged.` | `compare_health_dbs.py` found no health records lost, added, or changed. | You can use this output. |
+| `Some health records differ; see [FAIL] above.` | Some health records differ between the two directories. The indented lines under the `[FAIL]` show which tables and how many rows. | **Do not use this output.** |
+| `Deletion records (...): ... -> ...` | The number of deletion records. They only tell synced devices to delete a record and are not health data. `merge_health_sources.py` and `prune_empty_devices.py` never remove them, so the two numbers are normally the same. If some were removed by other means, `removed rows` lists them by table. | Nothing to do. |
+| `Applying pending changes in ...-wal to a temporary copy ...` | The directory has a `-wal` file with changes not yet written into the database. The script reads them from a temporary copy and doesn't change your files. | Nothing to do. |
 
 Every `--apply` run checks these automatically:
 
@@ -360,7 +394,11 @@ Every `--apply` run checks these automatically:
 - Each source has the expected number of records.
 - No records point to missing sources or hardware records.
 - Within the merged target source, records from different devices don't overlap in time.
+- When merging, the source priority order changed only as planned.
 - SQLite `quick_check` and `foreign_key_check` pass.
+- Unused space inside the databases was returned to the file system.
+
+For a full comparison of the result with the original, run `compare_health_dbs.py` (step 6).
 
 ## Why are there Old iPhone and Old Apple Watch sources?
 

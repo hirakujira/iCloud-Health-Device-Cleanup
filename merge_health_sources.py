@@ -13,6 +13,8 @@ Rules:
   to avoid double-counting cumulative values such as steps and distance.
 - Mark the remaining old sources as deleted, following healthd's source deletion
   behavior, without deleting any health records.
+- Carry old devices' places in the data source priority lists over to the target
+  where the target is not already listed.
 - Specify devices using a lid from the preview or a com.apple.health.<UUID> bundle ID.
 """
 
@@ -68,6 +70,10 @@ class Group:
     old_lids: list = field(default_factory=list)  # Priority order, newer devices first.
     moving_sids: set = field(default_factory=set)
     note: str = ""
+    # logical_source_order ROWIDs of removed devices: moved to the target, or dropped as duplicates.
+    order_moves: list = field(default_factory=list)
+    order_drops: list = field(default_factory=list)
+    order_split: int = 0  # Data types where other sources ranked between the target and an old device.
 
 
 def ro(path: Path) -> sqlite3.Connection:
@@ -288,6 +294,33 @@ def assign(sec, devices, groups):
     return legacy, moved_by_lid, stacked
 
 
+def plan_source_order(main, groups, legacy):
+    """Carry removed devices' places in the data source priority lists over to the target.
+
+    For each data type, the target keeps its own entry if it has one; otherwise the
+    highest-ranked removed device's entry moves to the target. Other entries of removed
+    devices are dropped. Entries keep their ROWIDs, which set the order, so all other
+    sources keep their relative order.
+    """
+    order = defaultdict(list)
+    for rid, dt, lid in main.execute("SELECT ROWID, data_type, logical_source FROM logical_source_order ORDER BY ROWID"):
+        order[dt].append((rid, lid))
+    for g in groups.values():
+        gone = set(g.old_lids)
+        if legacy[g.kind]:
+            # The legacy device keeps its logical source for the overlapping records.
+            gone.discard(g.legacy_lid)
+        for rows in order.values():
+            ours = [i for i, (_, lid) in enumerate(rows) if lid == g.target_lid or lid in gone]
+            if not ours:
+                continue
+            keep = next((i for i in ours if rows[i][1] == g.target_lid), ours[0])
+            if rows[keep][1] != g.target_lid:
+                g.order_moves.append(rows[keep][0])
+            g.order_drops += [rows[i][0] for i in ours if i != keep]
+            g.order_split += len(ours) > 1 and ours[-1] - ours[0] + 1 != len(ours)
+
+
 def print_plan(devices, per_sid, groups, legacy, moved_by_lid, stacked):
     for g in groups.values():
         t = devices[g.target_lid]
@@ -303,6 +336,9 @@ def print_plan(devices, per_sid, groups, legacy, moved_by_lid, stacked):
         total = sum(devices[l].objects for l in g.old_lids)
         log(f"Total: {total:,} old records; {len(legacy[g.kind]):,} overlapping records moved to '{g.legacy_name}'; "
             f"{stacked[g.kind]:,} also overlap with other old devices")
+        log(f"Source priority: {len(g.order_moves):,} entries of old devices move to the target; "
+            f"{len(g.order_drops):,} dropped where the target or a higher-ranked old device is already listed"
+            + (f" ({g.order_split:,} data types had other sources ranked between them)" if g.order_split else ""))
 
 
 def make_snapshot(src: Path, out: Path) -> Path:
@@ -455,8 +491,18 @@ def apply_changes(out: Path, groups, legacy, devices):
                                    (lid,)).fetchone()]
         if dead:
             marks = ",".join("?" * len(dead))
-            report["deleted_logical_source_order"] = sec.execute(
+            moved = sum(sec.execute(f"UPDATE m.logical_source_order SET logical_source = ? "
+                                    f"WHERE ROWID = ? AND logical_source IN ({marks})",
+                                    (g.target_lid, rid, *dead)).rowcount
+                        for g in groups.values() for rid in g.order_moves)
+            dropped = sec.execute(
                 f"DELETE FROM m.logical_source_order WHERE logical_source IN ({marks})", dead).rowcount
+            planned = [sum(len(getattr(g, a)) for g in groups.values()) for a in ("order_moves", "order_drops")]
+            if [moved, dropped] != planned:
+                raise RuntimeError(f"Source priority entries changed differently than planned: "
+                                   f"moved {moved} / dropped {dropped}, expected {planned[0]} / {planned[1]}")
+            report["moved_logical_source_order"] = moved
+            report["deleted_logical_source_order"] = dropped
             report["deleted_logical_sources"] = sec.execute(
                 f"DELETE FROM m.logical_sources WHERE ROWID IN ({marks})", dead).rowcount
         sec.execute("COMMIT")
@@ -467,6 +513,35 @@ def apply_changes(out: Path, groups, legacy, devices):
     sec.execute("PRAGMA m.wal_checkpoint(TRUNCATE)")
     sec.close()
     return report
+
+
+def reclaim_space(out: Path):
+    """Return free pages to the file system, as healthd does with auto_vacuum = INCREMENTAL.
+
+    Unlike VACUUM, this keeps every row and ROWID in place.
+    Returns {file name: (auto_vacuum, page_size, page_count)} from before.
+    """
+    before = {}
+    for name in (MAIN_DB, SECURE_DB):
+        conn = sqlite3.connect(out / name, isolation_level=None)
+        before[name] = tuple(conn.execute(f"PRAGMA {p}").fetchone()[0] for p in ("auto_vacuum", "page_size", "page_count"))
+        if before[name][0] == 2:
+            conn.execute("PRAGMA incremental_vacuum").fetchall()
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.close()
+    return before
+
+
+def check_reclaimed(check, out: Path, before):
+    for name, (mode, size, pages) in before.items():
+        if mode != 2:
+            continue
+        conn = ro(out / name)
+        n, free = (conn.execute(f"PRAGMA {p}").fetchone()[0] for p in ("page_count", "freelist_count"))
+        conn.close()
+        check(f"{name}: free space returned to the file system",
+              free == 0 and (out / name).stat().st_size == n * size,
+              f"{pages * size / 1e6:,.1f} -> {n * size / 1e6:,.1f} MB")
 
 
 def cross_device_overlaps(items):
@@ -483,10 +558,10 @@ def cross_device_overlaps(items):
     return hits
 
 
-def validate(src: Path, out: Path, groups, devices, legacy):
+def validate(src: Path, out: Path, groups, devices, legacy, space):
     ok = True
     s_src, s_out = ro(src / SECURE_DB), ro(out / SECURE_DB)
-    m_out = ro(out / MAIN_DB)
+    m_src, m_out = ro(src / MAIN_DB), ro(out / MAIN_DB)
     s_out.execute("ATTACH DATABASE ? AS m", (ro_uri(out / MAIN_DB),))
     s_src.execute("ATTACH DATABASE ? AS m", (ro_uri(src / MAIN_DB),))
 
@@ -567,12 +642,22 @@ def validate(src: Path, out: Path, groups, devices, legacy):
         check(f"{g.label} target source has no cross-device time overlaps", overlaps_found[g.kind] == 0,
               overlaps_found[g.kind])
 
-    for name, conn, src_conn in (("healthdb_secure", s_out, s_src), ("healthdb", m_out, ro(src / MAIN_DB))):
+    q = "SELECT ROWID, data_type, logical_source, user_preferred FROM logical_source_order ORDER BY ROWID"
+    moved = {rid: g.target_lid for g in groups.values() for rid in g.order_moves}
+    dropped = {rid for g in groups.values() for rid in g.order_drops}
+    before = m_src.execute(q).fetchall()
+    after = m_out.execute(q).fetchall()
+    check("Source priority order changed only as planned",
+          after == [(rid, dt, moved.get(rid, lid), up) for rid, dt, lid, up in before if rid not in dropped],
+          f"{len(before):,} -> {len(after):,} entries")
+
+    for name, conn, src_conn in (("healthdb_secure", s_out, s_src), ("healthdb", m_out, m_src)):
         res = conn.execute("PRAGMA quick_check").fetchall()
         check(f"{name} quick_check", res == [("ok",)], res[:3] if res != [("ok",)] else "")
         a = len(src_conn.execute("PRAGMA main.foreign_key_check").fetchall())
         b = len(conn.execute("PRAGMA main.foreign_key_check").fetchall())
         check(f"{name} foreign_key_check has no new violations", b <= a, f"{a} -> {b}")
+    check_reclaimed(check, out, space)
 
     log("\nDevice sources remaining after merging:")
     for lid, bundle, name, ptype, n in m_out.execute(
@@ -636,6 +721,7 @@ def main():
 
     log("Calculating overlapping intervals ...")
     legacy, moved_by_lid, stacked = assign(sec_ro, devices, groups)
+    plan_source_order(main_ro, groups, legacy)
     print_plan(devices, per_sid, groups, legacy, moved_by_lid, stacked)
     if not args.apply:
         log("\nThis is a preview. Check the plan, then add --apply to create merged copies.")
@@ -649,8 +735,10 @@ def main():
     report = apply_changes(out, groups, legacy, devices)
     for k, v in report.items():
         log(f"  {k}: {v:,}")
+    log("Reclaiming free space ...")
+    space = reclaim_space(out)
     log("\nValidating ...")
-    ok = validate(base, out, groups, devices, legacy)
+    ok = validate(base, out, groups, devices, legacy, space)
     if ok:
         shutil.rmtree(base)
         log("\nAll checks passed.")

@@ -25,8 +25,9 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from merge_health_sources import (MAIN_DB, PROV_COLS, SECURE_DB, UNIQUE_COLS, apple_date, detect_targets, log,
-                                  make_snapshot, pad, provenance_stats, ro, ro_uri, to_bundle)
+from merge_health_sources import (MAIN_DB, PROV_COLS, SECURE_DB, UNIQUE_COLS, apple_date, check_reclaimed,
+                                  detect_targets, log, make_snapshot, pad, provenance_stats, reclaim_space, ro,
+                                  ro_uri, to_bundle)
 
 # healthd uses this hidden entry for "no device"; leave it untouched.
 NONE_DEVICE = "__NONE__"
@@ -261,7 +262,7 @@ def apply_changes(out: Path, prune_ids, updates, repoint, empty=()):
     return report
 
 
-def validate(src: Path, out: Path, n_merged, targets, n_empty=0, relinked=()):
+def validate(src: Path, out: Path, space, n_merged, targets, n_empty=0, relinked=()):
     ok = True
 
     def check(label, cond, detail=""):
@@ -316,6 +317,7 @@ def validate(src: Path, out: Path, n_merged, targets, n_empty=0, relinked=()):
         a = len(a_conn.execute("PRAGMA foreign_key_check").fetchall())
         b = len(b_conn.execute("PRAGMA foreign_key_check").fetchall())
         check(f"{name} foreign_key_check has no new violations", b <= a, f"{a} -> {b}")
+    check_reclaimed(check, out, space)
     for p in out.iterdir():
         if p.name.endswith(("-wal", "-shm")):
             check(f"No remaining data in {p.name}", p.stat().st_size == 0, p.stat().st_size)
@@ -395,8 +397,10 @@ def main():
     report = apply_changes(out, [r[0] for r in orphans], updates, repoint, list(empty))
     for k, v in report.items():
         log(f"  {k}: {v:,}")
+    log("Reclaiming free space ...")
+    space = reclaim_space(out)
     log("\nValidating ...")
-    ok = validate(base, out, len(repoint), targets, len(empty), list(relink))
+    ok = validate(base, out, space, len(repoint), targets, len(empty), list(relink))
     if repoint:
         got = report.get("objects_repointed", 0)
         ok &= got == expected

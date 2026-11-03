@@ -13,7 +13,7 @@ App 只提供「刪除所有資料」，沒辦法「保留資料、只合併裝�
 
 ## 目錄
 
-1. [三支腳本各做什麼](#三支腳本各做什麼)
+1. [四支腳本各做什麼](#四支腳本各做什麼)
 2. [先認識幾個名詞](#先認識幾個名詞)
 3. [開始之前一定要做的事](#開始之前一定要做的事)
 4. [整個流程一覽](#整個流程一覽)
@@ -25,19 +25,20 @@ App 只提供「刪除所有資料」，沒辦法「保留資料、只合併裝�
 10. [已知限制](#已知限制)
 11. [使用風險](#使用風險)
 
-## 三支腳本各做什麼
+## 四支腳本各做什麼
 
 | 腳本 | 做什麼 | 會不會修改資料 |
 | --- | --- | --- |
 | `list_health_sources.py` | **查看**：列出資料庫裡有哪些來源和裝置、各有幾筆紀錄 | 不會，只會讀取 |
 | `merge_health_sources.py` | **合併來源**：把舊 iPhone 的紀錄搬到目前的 iPhone，把舊 Apple Watch 的紀錄搬到目前的手錶 | 只修改 `--out` 資料夾裡的複本 |
 | `prune_empty_devices.py` | **清理「裝置」頁**：刪除沒有資料的硬體紀錄（選用） | 只修改 `--out` 資料夾裡的複本 |
+| `compare_health_dbs.py` | **驗證**：比對原始資料庫和最後的結果，確認健康紀錄沒有遺失或被改動，並列出其他有變動的地方 | 不會，只會讀取 |
 
-使用順序：**先查看 → 再合併 → 需要的話再清理**。
+使用順序：**先查看 → 再合併 → 需要的話再清理 → 最後和原始資料比對**。
 
 這些腳本只用到 Python 3 內建的功能，不需要安裝其他套件。在終端機輸入 `python3 --version`，有顯示版本號碼就可以使用。
 
-所有指令都要在**這個專案的資料夾裡**執行，因為三支腳本會互相引用。指令裡的 `-B` 是讓 Python 不要產生快取檔案，照著打就好。
+所有指令都要在**這個專案的資料夾裡**執行，因為這些腳本會互相引用。指令裡的 `-B` 是讓 Python 不要產生快取檔案，照著打就好。
 
 ## 先認識幾個名詞
 
@@ -77,9 +78,10 @@ App 只提供「刪除所有資料」，沒辦法「保留資料、只合併裝�
 | 3 | 預覽合併 → 確認 → 套用，產生 `merged/` | `merge_health_sources.py` |
 | 4 | 檢查合併結果 | `list_health_sources.py` |
 | 5 | （選用）預覽清理 → 確認 → 套用，產生 `final/` | `prune_empty_devices.py` |
-| 6 | 把修改後的檔案放回備份，刪掉舊的暫存檔 | iMazing |
-| 7 | 把備份還原到手機 | iMazing |
-| 8 | 在手機上檢查結果，再打開 iCloud 同步 | iPhone |
+| 6 | 和原始資料比對，確認健康紀錄沒有改變 | `compare_health_dbs.py` |
+| 7 | 把修改後的檔案放回備份，刪掉舊的暫存檔 | iMazing |
+| 8 | 把備份還原到手機 | iMazing |
+| 9 | 在手機上檢查結果，再打開 iCloud 同步 | iPhone |
 
 ## 詳細步驟
 
@@ -99,6 +101,7 @@ iCloud-Health-Device-Cleanup/
 ├── backup/
 │   ├── healthdb.sqlite
 │   └── healthdb_secure.sqlite
+├── compare_health_dbs.py
 ├── list_health_sources.py
 ├── merge_health_sources.py
 └── prune_empty_devices.py
@@ -139,6 +142,7 @@ python3 -B merge_health_sources.py --src backup --out merged
 - `Target:` 後面是不是你**現在使用**的裝置？如果不是，請用 `--iphone-target` 或 `--watch-target` 指定。
 - 下面表格列出的，是**會被合併掉**的舊裝置。裡面有不想合併的裝置嗎？有的話，用 `--keep` 排除。
 - `To legacy` 這一欄是重疊紀錄的數量，這些紀錄會放到 `Old iPhone` 或 `Old Apple Watch`。
+- `Source priority:` 是舊裝置在來源優先順序（各種資料的「資料來源與取用權」）裡的位置，有幾個會改由目標裝置接手。目標裝置本來就在列表裡的，維持它原本的位置，舊裝置那一項會被移除。
 
 不對就加上參數再預覽一次，直到結果正確為止。參數請看[所有參數說明](#所有參數說明)和[常見情況與範例](#常見情況與範例)。
 
@@ -150,6 +154,8 @@ python3 -B merge_health_sources.py --src backup --out merged --apply
 
 等它跑完，**最後一行必須是 `All checks passed.`**。只要畫面上有任何 `[FAIL]`，就不要使用這份輸出。
 
+輸出的檔案可能比原本的小。套用後，腳本會把資料庫裡用不到的空間還給檔案系統，「健康」App 自己也會這樣做。這不會刪除任何資料。
+
 ### 步驟 4：檢查合併結果
 
 ```sh
@@ -160,7 +166,7 @@ python3 -B list_health_sources.py --src merged --devices
 
 ### 步驟 5：清理「裝置」頁（選用）
 
-這一步可以跳過。跳過的話，步驟 6 就用 `merged/` 裡的檔案。
+這一步可以跳過。跳過的話，之後的步驟把 `final/` 換成 `merged/`。
 
 先看看有哪些硬體紀錄：
 
@@ -190,28 +196,45 @@ python3 -B prune_empty_devices.py --src merged --out final --collapse --apply
 - **`--collapse` 不理會合併時的 `--keep`。** 如果你在步驟 3 用 `--keep` 保留了某台 iPhone 或 Apple Watch，它的硬體紀錄也會被改成目標裝置的型號。這種情況建議不要用 `--collapse`。
 - 如果步驟 3 用了 `--iphone-target` 或 `--watch-target`，這裡也要加上**一樣的參數**。不然它會自動判斷，可能選到另一台。
 
-同樣地，`--apply` 的最後一行必須是 `All checks passed.`。如果顯示 `No device records to clean up; no output created.`，代表沒有東西需要清理，步驟 6 改用 `merged/`。
+同樣地，`--apply` 的最後一行必須是 `All checks passed.`。如果顯示 `No device records to clean up; no output created.`，代表沒有東西需要清理，之後的步驟改用 `merged/`。
 
-### 步驟 6：把檔案放回備份
+### 步驟 6：和原始資料比對
+
+比對 `backup/` 裡的原始資料庫和最後的結果（`final/`；跳過步驟 5 的話是 `merged/`）：
+
+```sh
+python3 -B compare_health_dbs.py --before backup --after final
+```
+
+它只會讀取兩個資料夾，可能要跑一分鐘左右。請檢查畫面上的內容：
+
+- `=== Health records ===` 下面的每一項都必須是 `[OK]`，**最後一行必須是 `All health records are unchanged.`**。這代表每一筆健康紀錄都還在、內容沒有改變，每種資料的筆數和總和也都一樣。
+- `Records moved to another source` 列出紀錄從哪個來源搬到哪個來源，以及筆數。這裡應該只有你預期的搬移：從舊裝置搬到目前的裝置，或搬到 `Old iPhone`、`Old Apple Watch`。`Records moved to another hardware record` 列出硬體紀錄的變更，例如 `--collapse` 或 `--relink` 造成的。
+- `=== Other changes ===` 列出健康紀錄以外的變動：被刪除或改名的來源、被刪除的硬體紀錄，以及每個資料表刪除、新增、修改了幾列。`cached_queries`、`sample_aggregate_caches`、`sleep_day_summary_cache` 是「健康」App 會自己重建的快取。`data_provenances` 記錄每筆紀錄來自哪個來源和裝置，`logical_source_order` 是來源的優先順序。
+
+只要有任何 `[FAIL]`，就不要使用這份輸出。任意兩個資料夾都可以比對，例如 `--before backup --after merged`。
+
+### 步驟 7：把檔案放回備份
 
 1. 在 iMazing 打開可編輯副本的 `HealthDomain/Health/`。
 2. 用輸出資料夾裡的 `healthdb.sqlite` 和 `healthdb_secure.sqlite`，**覆蓋**原本的同名檔案：
    - 有做步驟 5，就用 `final/` 裡的檔案。
    - 沒做步驟 5，或步驟 5 沒有產生輸出，就用 `merged/` 裡的檔案。
 
-### 步驟 7：還原到手機
+### 步驟 8：還原到手機
 
 用 iMazing 把這份可編輯副本還原（Restore）到 iPhone。
 
 - 如果手機開著「尋找」，iMazing 會要求你先關閉。
 - 需要輸入備份密碼。
 
-### 步驟 8：在手機上檢查
+### 步驟 9：在手機上檢查
 
 打開「健康」App，確認：
 
 - 「來源」裡只剩目前的裝置、你用 `--keep` 保留的裝置，以及 `Old iPhone`、`Old Apple Watch`（只有在有重疊紀錄時才會出現）。
 - 有做步驟 5 的 `--collapse`：「裝置」頁只剩目前的 iPhone、Apple Watch 和其他配件（例如 AirPods）。沒有用 `--collapse` 的話，舊型號的硬體紀錄只要還有資料就會保留，這是正常的。
+- 挑幾種資料打開「資料來源與取用權」：目前的裝置在優先順序裡，會出現在舊裝置原本的位置；本來就在列表裡的，則維持原本的位置。
 
 都沒問題後，再打開 iCloud 的「健康」同步。
 
@@ -265,6 +288,13 @@ python3 -B list_health_sources.py --src merged --hardware --devices  # 只看 iP
 | `--relink 舊=新` | 選填，可重複 | 把「舊」硬體紀錄的資料改指向現有的「新」紀錄，例如 `--relink 165=184`。「舊」可以是已經不存在、但仍有資料指向它的紀錄（`list_health_sources.py --hardware` 最後的 `[WARNING]` 會列出來），也可以是現有的紀錄，用來把同一個裝置的多筆紀錄併成一筆（例如同一副 AirPods）。現有的「舊」紀錄改完後沒有資料，會被刪除，**它的型號和韌體資訊會消失，無法復原**。預覽會列出每組兩邊的名稱、型號、韌體、建立日期，以及筆數、第一筆和最新一筆紀錄的日期，請確認是同一個裝置再套用。每個「舊」都要直接指向最後要保留的紀錄。 | 不修改這類資料 |
 | `--iphone-target 裝置` | 選填 | 指定**目前的 iPhone**，只在加上 `--collapse` 時有作用。請和合併時用的一樣。 | 資料庫標記為「本機」的 iPhone |
 | `--watch-target 裝置` | 選填 | 指定**目前的 Apple Watch**，只在加上 `--collapse` 時有作用。請和合併時用的一樣。 | 最後配對的手錶 |
+
+### `compare_health_dbs.py`（驗證，不會修改任何檔案）
+
+| 參數 | 必填？ | 說明 |
+| --- | --- | --- |
+| `--before 資料夾` | 必填 | 放原始資料庫的資料夾，通常是 `backup`。 |
+| `--after 資料夾` | 必填 | 要檢查的結果所在的資料夾，例如 `final` 或 `merged`。 |
 
 ## 常見情況與範例
 
@@ -344,7 +374,7 @@ python3 -B merge_health_sources.py --src backup --out merged --iphone-legacy-nam
 | `[WARNING] ... is still in nano_pairing ...` | 某支要被合併的手錶還留有配對紀錄。 | 確認它已經在 Watch App 解除配對。已經解除的話可以繼續；解除配對後，舊紀錄常常還會留著。如果那支手錶還在使用，請用 `--keep` 保留它。 |
 | `iPhone: no old devices to merge` 或 `Apple Watch: no old devices to merge` | 這類裝置沒有需要合併的舊裝置。 | 不用做任何事。 |
 | `No devices to merge; no output created.` | 完全沒有需要合併的裝置，沒有產生輸出。 | 不用做任何事。 |
-| `No device records to clean up; no output created.` | `prune_empty_devices.py` 沒有找到需要清理的硬體紀錄。 | 步驟 6 改用 `merged/`。 |
+| `No device records to clean up; no output created.` | `prune_empty_devices.py` 沒有找到需要清理的硬體紀錄。 | 之後的步驟改用 `merged/`。 |
 | `Cannot detect the current iPhone; specify --iphone-target ...`（或 Apple Watch） | 腳本判斷不出你目前使用的裝置。 | 用 `list_health_sources.py --devices` 查出 lid，再用 `--iphone-target` 或 `--watch-target` 指定。 |
 | `Invalid target or legacy source for ...` | 指定的目標或存放重疊紀錄的來源不正確。例如型號類型不符、目標和存放來源是同一台，或存放來源被 `--keep` 排除了。 | 檢查 `--*-target`、`--*-legacy`、`--keep` 填的 lid。 |
 | `No source found for lid ...` | 填的 lid 不存在。 | 用 `list_health_sources.py` 重新查。 |
@@ -352,6 +382,10 @@ python3 -B merge_health_sources.py --src backup --out merged --iphone-legacy-nam
 | `FileExistsError: ...` | `--out` 指定的資料夾已經存在。 | 刪掉它，或換一個名字。 |
 | `Stopped: ... conflicting derived_flags ...` | 清理時發現無法安全合併的資料，已經停止，沒有產生輸出。 | 改用不加 `--collapse` 的清理，或跳過步驟 5。 |
 | `[WARNING] Data references ... missing hardware records ...` | 有資料指向已經不存在的硬體紀錄。 | 依列出的日期找出對應的現有硬體紀錄，用 `prune_empty_devices.py --relink 舊=新` 修復。 |
+| `All health records are unchanged.` | `compare_health_dbs.py` 確認沒有健康紀錄遺失、新增或被改動。 | 可以使用這份輸出。 |
+| `Some health records differ; see [FAIL] above.` | 兩個資料夾之間有健康紀錄不同。`[FAIL]` 下面縮排的幾行會列出是哪些資料表、幾列。 | **不要使用這份輸出。** |
+| `Deletion records (...): ... -> ...` | 刪除標記的數量。刪除標記只是用來通知同步的裝置刪掉某筆紀錄，不是健康資料。`merge_health_sources.py` 和 `prune_empty_devices.py` 不會刪除它們，所以兩邊的數字通常相同。如果被其他方式刪掉了一些，`removed rows` 會依資料表列出。 | 不用做任何事。 |
+| `Applying pending changes in ...-wal to a temporary copy ...` | 資料夾裡有 `-wal` 檔，裡面還有沒寫進資料庫的變更。腳本會在暫存的複本裡讀取它們，不會修改你的檔案。 | 不用做任何事。 |
 
 每次 `--apply` 都會自動檢查這些項目：
 
@@ -360,7 +394,11 @@ python3 -B merge_health_sources.py --src backup --out merged --iphone-legacy-nam
 - 每個來源的紀錄筆數符合預期。
 - 沒有紀錄指向不存在的來源或硬體紀錄。
 - 合併後的目標來源裡，不同裝置之間沒有時間重疊。
+- 合併時，來源的優先順序只照計畫改變。
 - SQLite 的 `quick_check` 和 `foreign_key_check` 都正常。
+- 資料庫裡用不到的空間已經還給檔案系統。
+
+想把結果和原始資料完整比對一次，請執行 `compare_health_dbs.py`（步驟 6）。
 
 ## 為什麼會多出「Old iPhone」和「Old Apple Watch」
 
