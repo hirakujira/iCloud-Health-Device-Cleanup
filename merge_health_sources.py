@@ -22,6 +22,7 @@ import shutil
 import sqlite3
 import sys
 import time
+import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -82,10 +83,27 @@ def log(msg=""):
     print(msg, flush=True)
 
 
+def pad(text, width):
+    # Wide characters such as CJK take two terminal columns.
+    cols = sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+    return text + " " * max(width - cols, 0)
+
+
 def apple_date(ts):
     if ts is None:
         return "-"
     return time.strftime("%Y-%m-%d", time.gmtime(ts + APPLE_EPOCH))
+
+
+def provenance_stats(sec):
+    """Return {provenance ID: (records, first start date, last end date)}.
+
+    Future end dates are ignored for the last date, as in load_devices.
+    """
+    now = time.time() - APPLE_EPOCH
+    return {pid: (n, first, last) for pid, n, first, last in sec.execute(
+        "SELECT o.provenance, count(*), min(sm.start_date), max(CASE WHEN sm.end_date <= ? THEN sm.end_date END) "
+        "FROM objects o LEFT JOIN samples sm ON sm.data_id = o.data_id GROUP BY 1", (now,))}
 
 
 def load_devices(main, sec):
@@ -470,6 +488,7 @@ def validate(src: Path, out: Path, groups, devices, legacy):
     s_src, s_out = ro(src / SECURE_DB), ro(out / SECURE_DB)
     m_out = ro(out / MAIN_DB)
     s_out.execute("ATTACH DATABASE ? AS m", (ro_uri(out / MAIN_DB),))
+    s_src.execute("ATTACH DATABASE ? AS m", (ro_uri(src / MAIN_DB),))
 
     def check(label, cond, detail=""):
         nonlocal ok
@@ -486,12 +505,15 @@ def validate(src: Path, out: Path, groups, devices, legacy):
     check("No records reference missing provenance", s_out.execute(
         "SELECT count(*) FROM objects o LEFT JOIN data_provenances p ON p.ROWID = o.provenance "
         "WHERE p.ROWID IS NULL").fetchone()[0] == 0)
-    n = s_out.execute("SELECT count(*) FROM data_provenances p LEFT JOIN m.sources so "
-                      "ON so.ROWID = p.source_id WHERE so.ROWID IS NULL OR so.deleted = 1").fetchone()[0]
-    check("No provenance references deleted or missing sources", n == 0, n)
-    n = s_out.execute("SELECT count(*) FROM external_sync_ids e JOIN m.sources so "
-                      "ON so.ROWID = e.source_id WHERE so.deleted = 1").fetchone()[0]
-    check("external_sync_ids does not reference deleted sources", n == 0, n)
+    # healthd itself can leave data under deleted sources, so only flag references added by the merge.
+    q = ("SELECT p.ROWID, p.source_id FROM data_provenances p LEFT JOIN m.sources so "
+         "ON so.ROWID = p.source_id WHERE so.ROWID IS NULL OR so.deleted = 1")
+    a, b = set(s_src.execute(q)), set(s_out.execute(q))
+    check("No new provenance references deleted or missing sources", b <= a, f"{len(a):,} -> {len(b):,}")
+    q = ("SELECT e.ROWID, e.source_id FROM external_sync_ids e JOIN m.sources so "
+         "ON so.ROWID = e.source_id WHERE so.deleted = 1")
+    a, b = set(s_src.execute(q)), set(s_out.execute(q))
+    check("external_sync_ids has no new references to deleted sources", b <= a, f"{len(a):,} -> {len(b):,}")
     dup = s_out.execute("SELECT count(*) FROM (SELECT 1 FROM external_sync_ids WHERE deleted = 0 "
                         "GROUP BY source_id, object_code, sid HAVING count(*) > 1)").fetchone()[0]
     dup0 = s_src.execute("SELECT count(*) FROM (SELECT 1 FROM external_sync_ids WHERE deleted = 0 "

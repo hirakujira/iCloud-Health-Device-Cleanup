@@ -226,8 +226,8 @@ python3 -B prune_empty_devices.py --src merged --out final --collapse --apply
 | 參數 | 必填？ | 說明 |
 | --- | --- | --- |
 | `--src 資料夾` | 必填 | 放 `healthdb.sqlite` 和 `healthdb_secure.sqlite` 的資料夾。可以是 `backup`、`merged`、`final`。 |
-| `--devices` | 選填 | 只列出 iPhone 和 Apple Watch，不列 App。 |
-| `--hardware` | 選填 | 改列「裝置」頁的硬體紀錄。標示 `unused` 的是沒有資料、會被 `prune_empty_devices.py` 刪掉的項目。`__NONE__` 是系統內部用的項目，只會彙總成一行，腳本不會動它。 |
+| `--devices` | 選填 | 只列出 iPhone 和 Apple Watch。不加 `--hardware` 時排除 App；加上 `--hardware` 時排除 AirPods 等配件，最後一行的 `unused` 數量也只計算列出的項目。想知道 `prune_empty_devices.py` 實際會刪掉哪些，請不要加 `--devices`。 |
+| `--hardware` | 選填 | 改列「裝置」頁的硬體紀錄。標示 `unused` 的是沒有資料、會被 `prune_empty_devices.py` 刪掉的項目。最後一欄 `Source` 是哪個 iPhone 或 Apple Watch 來源（名稱和 lid）寫入了使用這筆硬體紀錄的資料，紀錄多的排前面；AirPods 會顯示和它搭配使用的 iPhone，只有 App 寫入時顯示 `-`。`Created` 是這筆硬體紀錄建立的日期，`Last data` 是最新一筆紀錄的日期。如果有資料指向已經不存在的硬體紀錄，最後會用 `[WARNING]` 另外列出它們的 ID、筆數，以及第一筆和最新一筆紀錄的日期。`__NONE__` 是系統內部用的項目，只會彙總成一行，腳本不會動它。 |
 
 常用指令：
 
@@ -235,7 +235,7 @@ python3 -B prune_empty_devices.py --src merged --out final --collapse --apply
 python3 -B list_health_sources.py --src backup                       # 所有來源（含 App）
 python3 -B list_health_sources.py --src backup --devices             # 只看 iPhone 和 Apple Watch
 python3 -B list_health_sources.py --src merged --hardware            # 「裝置」頁的硬體紀錄
-python3 -B list_health_sources.py --src merged --hardware --devices  # 只看 iPhone 和 Apple Watch 的硬體紀錄
+python3 -B list_health_sources.py --src merged --hardware --devices  # 只看 iPhone 和 Apple Watch 的硬體紀錄（不含 AirPods）
 ```
 
 ### `merge_health_sources.py`（合併來源）
@@ -261,6 +261,8 @@ python3 -B list_health_sources.py --src merged --hardware --devices  # 只看 iP
 | `--out 資料夾` | 必填 | 輸出資料夾，例如 `final`。**必須是還不存在的資料夾。** 預覽時也要填，但不會建立。 | – |
 | `--apply` | 選填 | 真的產生修改後的複本。 | 只預覽，不產生檔案 |
 | `--collapse` | 選填 | 把所有 iPhone 和 Apple Watch 的硬體紀錄併成目前的裝置，再刪除變空的紀錄。**無法復原，而且不理會 `--keep`。** | 只刪除沒有資料的硬體紀錄 |
+| `--drop-empty-provenance` | 選填 | 有些硬體紀錄（例如部分 AirPods）底下沒有任何健康紀錄，只被空的 provenance 引用，所以顯示 0 筆卻沒有標 `unused`。加上這個參數會先刪掉這些空的 provenance，再把這類硬體紀錄一起刪除。不會刪除任何健康紀錄。 | 這類硬體紀錄會保留 |
+| `--relink 舊=新` | 選填，可重複 | 把「舊」硬體紀錄的資料改指向現有的「新」紀錄，例如 `--relink 165=184`。「舊」可以是已經不存在、但仍有資料指向它的紀錄（`list_health_sources.py --hardware` 最後的 `[WARNING]` 會列出來），也可以是現有的紀錄，用來把同一個裝置的多筆紀錄併成一筆（例如同一副 AirPods）。現有的「舊」紀錄改完後沒有資料，會被刪除，**它的型號和韌體資訊會消失，無法復原**。預覽會列出每組兩邊的名稱、型號、韌體、建立日期，以及筆數、第一筆和最新一筆紀錄的日期，請確認是同一個裝置再套用。每個「舊」都要直接指向最後要保留的紀錄。 | 不修改這類資料 |
 | `--iphone-target 裝置` | 選填 | 指定**目前的 iPhone**，只在加上 `--collapse` 時有作用。請和合併時用的一樣。 | 資料庫標記為「本機」的 iPhone |
 | `--watch-target 裝置` | 選填 | 指定**目前的 Apple Watch**，只在加上 `--collapse` 時有作用。請和合併時用的一樣。 | 最後配對的手錶 |
 
@@ -349,6 +351,7 @@ python3 -B merge_health_sources.py --src backup --out merged --iphone-legacy-nam
 | `Missing healthdb.sqlite ...` | `--src` 指定的資料夾裡找不到資料庫檔案。 | 確認資料夾名稱，以及兩個檔案都有放進去。 |
 | `FileExistsError: ...` | `--out` 指定的資料夾已經存在。 | 刪掉它，或換一個名字。 |
 | `Stopped: ... conflicting derived_flags ...` | 清理時發現無法安全合併的資料，已經停止，沒有產生輸出。 | 改用不加 `--collapse` 的清理，或跳過步驟 5。 |
+| `[WARNING] Data references ... missing hardware records ...` | 有資料指向已經不存在的硬體紀錄。 | 依列出的日期找出對應的現有硬體紀錄，用 `prune_empty_devices.py --relink 舊=新` 修復。 |
 
 每次 `--apply` 都會自動檢查這些項目：
 
@@ -382,7 +385,7 @@ python3 -B merge_health_sources.py --src backup --out merged --iphone-legacy-nam
 ## 已知限制
 
 - 只處理 Apple 的 iPhone 和 Apple Watch。App 寫入的來源不會改動。
-- **AirPods 等配件不會合併。** AirPods 沒有自己的來源，它的資料是由 iPhone 寫入的，只會出現在「裝置」頁的硬體紀錄裡。`prune_empty_devices.py` 只會在 AirPods 的硬體紀錄完全沒有資料時才刪除它，`--collapse` 也不會合併 AirPods。
+- **AirPods 等配件不會合併。** AirPods 沒有自己的來源，它的資料是由 iPhone 寫入的，只會出現在「裝置」頁的硬體紀錄裡。`prune_empty_devices.py` 只會在 AirPods 的硬體紀錄完全沒有資料時才刪除它，`--collapse` 也不會合併 AirPods。要把同一副 AirPods 的多筆硬體紀錄併成一筆，請用 `--relink` 逐筆指定。之後 iPhone 記錄耳機音量、耳機心率，或耳機更新韌體時，系統仍可能再新增硬體紀錄。
 - 同時配對多支手錶時，自動判斷會選最後配對的那一支。請在預覽時確認 `Target:` 是否正確。
 - 之後每次更新 iOS 或 watchOS，系統仍可能新增一筆硬體紀錄。「裝置」頁又變多時，可以再執行一次 `prune_empty_devices.py`。
 

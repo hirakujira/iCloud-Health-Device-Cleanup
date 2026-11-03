@@ -226,8 +226,8 @@ Wherever an option takes a "device", you can use a **lid** (such as `39`) or a *
 | Option | Required? | Description |
 | --- | --- | --- |
 | `--src DIR` | Required | Directory containing `healthdb.sqlite` and `healthdb_secure.sqlite`. Can be `backup`, `merged`, or `final`. |
-| `--devices` | Optional | List only iPhones and Apple Watches, not apps. |
-| `--hardware` | Optional | List the hardware records on the Devices page instead. Entries marked `unused` have no data and will be removed by `prune_empty_devices.py`. `__NONE__` is an internal entry; it is summarized on one line and never changed. |
+| `--devices` | Optional | List only iPhones and Apple Watches. Without `--hardware`, this excludes apps; with `--hardware`, it excludes AirPods and other accessories, and the `unused` count covers only the listed records. To see everything `prune_empty_devices.py` will remove, leave out `--devices`. |
+| `--hardware` | Optional | List the hardware records on the Devices page instead. Entries marked `unused` have no data and will be removed by `prune_empty_devices.py`. The last column, `Source`, shows which iPhone or Apple Watch sources (name and lid) wrote data that uses the record, most records first; for AirPods this is the iPhone they were used with, and `-` means only apps wrote data. `Created` is when the hardware record was created, and `Last data` is the date of the latest record. If any data references hardware records that no longer exist, a `[WARNING]` at the end lists their IDs, record counts, and first and latest record dates. `__NONE__` is an internal entry; it is summarized on one line and never changed. |
 
 Common commands:
 
@@ -235,7 +235,7 @@ Common commands:
 python3 -B list_health_sources.py --src backup                       # all sources, including apps
 python3 -B list_health_sources.py --src backup --devices             # only iPhones and Apple Watches
 python3 -B list_health_sources.py --src merged --hardware            # hardware records on the Devices page
-python3 -B list_health_sources.py --src merged --hardware --devices  # only iPhone and Apple Watch hardware records
+python3 -B list_health_sources.py --src merged --hardware --devices  # only iPhone and Apple Watch hardware records (no AirPods)
 ```
 
 ### `merge_health_sources.py` (merge sources)
@@ -261,6 +261,8 @@ python3 -B list_health_sources.py --src merged --hardware --devices  # only iPho
 | `--out DIR` | Required | Output directory, such as `final`. **It must not already exist.** Required for previews too, but not created. | – |
 | `--apply` | Optional | Actually create the modified copies. | Preview only; no files created |
 | `--collapse` | Optional | Combine all iPhone and Apple Watch hardware records into the current devices, then remove the records left empty. **Cannot be undone and ignores `--keep`.** | Only hardware records with no data are removed |
+| `--drop-empty-provenance` | Optional | Some hardware records (such as some AirPods) have no health records but are still referenced by empty provenance entries, so they show 0 records without being marked `unused`. This deletes those empty entries first, then removes the hardware records too. No health records are deleted. | These hardware records are kept |
+| `--relink OLD=NEW` | Optional, repeatable | Move data from hardware record OLD to the existing record NEW, for example `--relink 165=184`. OLD can be a record that no longer exists but is still referenced by data (listed in the `[WARNING]` at the end of `list_health_sources.py --hardware`), or an existing record, to combine several records for the same device (such as one pair of AirPods) into one. An existing OLD has no data afterwards and is removed; **its model and firmware details are lost and cannot be restored**. The preview shows both sides' name, model, firmware, and creation date, plus the record count and first and latest record dates; check that each pair is the same device before applying. Point every OLD directly to the record you want to keep. | This data is left unchanged |
 | `--iphone-target DEVICE` | Optional | Your **current iPhone**. Only used with `--collapse`. Use the same value as in the merge. | The iPhone marked as local in the database |
 | `--watch-target DEVICE` | Optional | Your **current Apple Watch**. Only used with `--collapse`. Use the same value as in the merge. | The most recently paired watch |
 
@@ -349,6 +351,7 @@ The original `backup/` is never changed, so you can reuse it as many times as yo
 | `Missing healthdb.sqlite ...` | The `--src` directory doesn't contain the database files. | Check the directory name and make sure both files are in it. |
 | `FileExistsError: ...` | The `--out` directory already exists. | Delete it or choose another name. |
 | `Stopped: ... conflicting derived_flags ...` | The cleanup found data it can't combine safely. It stopped and created no output. | Clean up without `--collapse`, or skip step 5. |
+| `[WARNING] Data references ... missing hardware records ...` | Some data references hardware records that no longer exist. | Use the listed dates to find the matching existing hardware records, then repair with `prune_empty_devices.py --relink OLD=NEW`. |
 
 Every `--apply` run checks these automatically:
 
@@ -382,7 +385,7 @@ So the script leaves these overlapping records in the old device's original sour
 ## Known limitations
 
 - Only Apple iPhones and Apple Watches are processed. Sources written by apps are left unchanged.
-- **AirPods and other accessories are not merged.** AirPods don't have their own source; their data is written by the iPhone and only appears as hardware records on the Devices page. `prune_empty_devices.py` removes an AirPods hardware record only if it has no data at all, and `--collapse` does not combine AirPods.
+- **AirPods and other accessories are not merged.** AirPods don't have their own source; their data is written by the iPhone and only appears as hardware records on the Devices page. `prune_empty_devices.py` removes an AirPods hardware record only if it has no data at all, and `--collapse` does not combine AirPods. To combine several hardware records for the same pair of AirPods, list each one with `--relink`. New hardware records may still appear later when the iPhone records headphone audio or heart rate, or after a firmware update.
 - If several watches are paired, automatic detection picks the most recently paired one. Check `Target:` in the preview.
 - Each iOS or watchOS update may still create another hardware record. Run `prune_empty_devices.py` again if the Devices page fills up.
 
