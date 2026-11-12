@@ -10,11 +10,13 @@ Rules:
   recently paired watch (nano_pairing); override with --iphone-target / --watch-target.
 - Move overlapping records to a legacy source of the same device type instead
   (--iphone-legacy / --watch-legacy, defaulting to the old device with the most records)
-  to avoid double-counting cumulative values such as steps and distance.
+  to avoid double-counting cumulative values such as steps and distance. With
+  --no-legacy, move them to the target too so that no legacy source remains.
 - Mark the remaining old sources as deleted, following healthd's source deletion
   behavior, without deleting any health records.
 - Carry old devices' places in the data source priority lists over to the target
-  where the target is not already listed.
+  where the target is not already listed. With --highest-priority, the target takes
+  the highest place of the target and old devices even where it is already listed.
 - Specify devices using a lid from the preview or a com.apple.health.<UUID> bundle ID.
 """
 
@@ -74,6 +76,7 @@ class Group:
     order_moves: list = field(default_factory=list)
     order_drops: list = field(default_factory=list)
     order_split: int = 0  # Data types where other sources ranked between the target and an old device.
+    order_raised: int = 0  # Data types where an old device's higher entry replaces the target's own.
 
 
 def ro(path: Path) -> sqlite3.Connection:
@@ -294,13 +297,15 @@ def assign(sec, devices, groups):
     return legacy, moved_by_lid, stacked
 
 
-def plan_source_order(main, groups, legacy):
+def plan_source_order(main, groups, legacy, highest=False):
     """Carry removed devices' places in the data source priority lists over to the target.
 
     For each data type, the target keeps its own entry if it has one; otherwise the
-    highest-ranked removed device's entry moves to the target. Other entries of removed
-    devices are dropped. Entries keep their ROWIDs, which set the order, so all other
-    sources keep their relative order.
+    highest-ranked removed device's entry moves to the target. With highest=True, the
+    highest-ranked entry of the target and removed devices goes to the target, and a
+    lower entry of the target's own is dropped. Other entries of removed devices are
+    dropped. Entries keep their ROWIDs, which set the order, so all other sources keep
+    their relative order.
     """
     order = defaultdict(list)
     for rid, dt, lid in main.execute("SELECT ROWID, data_type, logical_source FROM logical_source_order ORDER BY ROWID"):
@@ -314,31 +319,46 @@ def plan_source_order(main, groups, legacy):
             ours = [i for i, (_, lid) in enumerate(rows) if lid == g.target_lid or lid in gone]
             if not ours:
                 continue
-            keep = next((i for i in ours if rows[i][1] == g.target_lid), ours[0])
+            mine = next((i for i in ours if rows[i][1] == g.target_lid), None)
+            keep = ours[0] if highest or mine is None else mine
             if rows[keep][1] != g.target_lid:
                 g.order_moves.append(rows[keep][0])
+                g.order_raised += mine is not None
             g.order_drops += [rows[i][0] for i in ours if i != keep]
             g.order_split += len(ours) > 1 and ours[-1] - ours[0] + 1 != len(ours)
 
 
-def print_plan(devices, per_sid, groups, legacy, moved_by_lid, stacked):
+def print_plan(devices, per_sid, groups, overlap, moved_by_lid, stacked, no_legacy, highest):
     for g in groups.values():
         t = devices[g.target_lid]
         log(f"\n=== {g.label} ===")
-        lg = devices[g.legacy_lid]
         log(f"Target: lid {t.lid} {t.rows[-1][1]} ({t.rows[-1][2]}, {t.objects:,} records, {g.note})")
-        log(f"Overlapping data: lid {lg.lid} {lg.rows[-1][1]} -> renamed to '{g.legacy_name}'")
-        log(f"{'lid':>4}  {'Name':<28} {'Model':<11} {'Records':>10} {'To legacy':>10}  Last data")
+        if no_legacy:
+            log("Overlapping data: moved to the target too (--no-legacy); no legacy source is kept")
+        else:
+            lg = devices[g.legacy_lid]
+            log(f"Overlapping data: lid {lg.lid} {lg.rows[-1][1]} -> renamed to '{g.legacy_name}'")
+        col = "Overlap" if no_legacy else "To legacy"
+        log(f"{'lid':>4}  {'Name':<28} {'Model':<11} {'Records':>10} {col:>10}  Last data")
         for lid in g.old_lids:
             d = devices[lid]
             name = d.rows[-1][1] or "(unnamed)"
             log(f"{lid:>4}  {name:<28} {d.rows[-1][2]:<11} {d.objects:>10,} {moved_by_lid.get(lid, 0):>10,}  {apple_date(d.last_seen or None)}")
         total = sum(devices[l].objects for l in g.old_lids)
-        log(f"Total: {total:,} old records; {len(legacy[g.kind]):,} overlapping records moved to '{g.legacy_name}'; "
-            f"{stacked[g.kind]:,} also overlap with other old devices")
-        log(f"Source priority: {len(g.order_moves):,} entries of old devices move to the target; "
-            f"{len(g.order_drops):,} dropped where the target or a higher-ranked old device is already listed"
-            + (f" ({g.order_split:,} data types had other sources ranked between them)" if g.order_split else ""))
+        if no_legacy:
+            log(f"Total: {total:,} old records, all moved to the target; {len(overlap[g.kind]):,} of them overlap "
+                "with the target or another old device")
+        else:
+            log(f"Total: {total:,} old records; {len(overlap[g.kind]):,} overlapping records moved to '{g.legacy_name}'; "
+                f"{stacked[g.kind]:,} also overlap with other old devices")
+        if highest:
+            log(f"Source priority: {len(g.order_moves):,} entries of old devices move to the target "
+                f"(--highest-priority; {g.order_raised:,} of them rank above the target's own entry); "
+                f"{len(g.order_drops):,} lower-ranked entries of the target and old devices dropped")
+        else:
+            log(f"Source priority: {len(g.order_moves):,} entries of old devices move to the target; "
+                f"{len(g.order_drops):,} dropped where the target or a higher-ranked old device is already listed"
+                + (f" ({g.order_split:,} data types had other sources ranked between them)" if g.order_split else ""))
 
 
 def make_snapshot(src: Path, out: Path) -> Path:
@@ -491,11 +511,16 @@ def apply_changes(out: Path, groups, legacy, devices):
                                    (lid,)).fetchone()]
         if dead:
             marks = ",".join("?" * len(dead))
+            # With --highest-priority, an old device's higher entry replaces the target's own entry.
+            # Delete that entry first: a data type allows only one entry per logical source.
+            dropped = sum(sec.execute("DELETE FROM m.logical_source_order WHERE ROWID = ? AND logical_source = ?",
+                                      (rid, g.target_lid)).rowcount
+                          for g in groups.values() for rid in g.order_drops)
             moved = sum(sec.execute(f"UPDATE m.logical_source_order SET logical_source = ? "
                                     f"WHERE ROWID = ? AND logical_source IN ({marks})",
                                     (g.target_lid, rid, *dead)).rowcount
                         for g in groups.values() for rid in g.order_moves)
-            dropped = sec.execute(
+            dropped += sec.execute(
                 f"DELETE FROM m.logical_source_order WHERE logical_source IN ({marks})", dead).rowcount
             planned = [sum(len(getattr(g, a)) for g in groups.values()) for a in ("order_moves", "order_drops")]
             if [moved, dropped] != planned:
@@ -558,7 +583,7 @@ def cross_device_overlaps(items):
     return hits
 
 
-def validate(src: Path, out: Path, groups, devices, legacy, space):
+def validate(src: Path, out: Path, groups, devices, legacy, overlap, space):
     ok = True
     s_src, s_out = ro(src / SECURE_DB), ro(out / SECURE_DB)
     m_src, m_out = ro(src / MAIN_DB), ro(out / MAIN_DB)
@@ -624,6 +649,8 @@ def validate(src: Path, out: Path, groups, devices, legacy, space):
     out_prov_sid = {pid: sid for pid, sid in
                     s_out.execute("SELECT ROWID, source_id FROM data_provenances") if sid in target_sids}
     overlaps_found = {g.kind: 0 for g in groups.values()}
+    # Overlapping records moved to the target by --no-legacy are the only overlaps allowed there.
+    allowed = {k: overlap[k] - legacy[k] for k in overlap}
     for (dt,) in s_src.execute("SELECT DISTINCT data_type FROM samples").fetchall():
         orig = {}
         for did, s, e, pid, otype in s_src.execute(SAMPLES_BY_TYPE, (dt,)):
@@ -635,12 +662,16 @@ def validate(src: Path, out: Path, groups, devices, legacy, space):
         for did, _, _, pid, _ in s_out.execute(SAMPLES_BY_TYPE, (dt,)):
             sid = out_prov_sid.get(pid)
             if sid is not None and did in orig:
-                per_group[target_sids[sid].kind].append(orig[did])
+                k = target_sids[sid].kind
+                if did not in allowed[k]:
+                    per_group[k].append(orig[did])
         for k, items in per_group.items():
             overlaps_found[k] += cross_device_overlaps(items)
     for g in groups.values():
-        check(f"{g.label} target source has no cross-device time overlaps", overlaps_found[g.kind] == 0,
-              overlaps_found[g.kind])
+        n = len(allowed[g.kind])
+        check(f"{g.label} target source has no cross-device time overlaps"
+              + (f" besides the {n:,} overlapping records moved by --no-legacy" if n else ""),
+              overlaps_found[g.kind] == 0, overlaps_found[g.kind])
 
     q = "SELECT ROWID, data_type, logical_source, user_preferred FROM logical_source_order ORDER BY ROWID"
     moved = {rid: g.target_lid for g in groups.values() for rid in g.order_moves}
@@ -683,7 +714,15 @@ def main():
         ap.add_argument(f"--{opt}-legacy", metavar="DEVICE",
                         help="legacy source for overlapping data (lid or bundle ID); defaults to the old device with the most records")
         ap.add_argument(f"--{opt}-legacy-name", default=f"Old {label}", metavar="NAME", help="new name for the source holding overlapping data")
+    ap.add_argument("--no-legacy", action="store_true",
+                    help="move overlapping data to the target too instead of keeping a legacy source; "
+                         "cumulative values such as steps may be counted twice where records overlap")
+    ap.add_argument("--highest-priority", action="store_true",
+                    help="in data source priority lists, give the target the highest place of the target and "
+                         "old devices, even where the target is already listed lower")
     args = ap.parse_args()
+    if args.no_legacy and (args.iphone_legacy or args.watch_legacy):
+        ap.error("--no-legacy cannot be combined with --iphone-legacy or --watch-legacy")
 
     src = args.src.resolve()
     missing = [n for n in (MAIN_DB, SECURE_DB) if not (src / n).is_file()]
@@ -720,9 +759,10 @@ def main():
             log(f"[WARNING] {bundle} is still in nano_pairing (watch pairing records); confirm it has been unpaired in the Watch app")
 
     log("Calculating overlapping intervals ...")
-    legacy, moved_by_lid, stacked = assign(sec_ro, devices, groups)
-    plan_source_order(main_ro, groups, legacy)
-    print_plan(devices, per_sid, groups, legacy, moved_by_lid, stacked)
+    overlap, moved_by_lid, stacked = assign(sec_ro, devices, groups)
+    legacy = {k: set() for k in overlap} if args.no_legacy else overlap
+    plan_source_order(main_ro, groups, legacy, args.highest_priority)
+    print_plan(devices, per_sid, groups, overlap, moved_by_lid, stacked, args.no_legacy, args.highest_priority)
     if not args.apply:
         log("\nThis is a preview. Check the plan, then add --apply to create merged copies.")
         return 0
@@ -738,7 +778,7 @@ def main():
     log("Reclaiming free space ...")
     space = reclaim_space(out)
     log("\nValidating ...")
-    ok = validate(base, out, groups, devices, legacy, space)
+    ok = validate(base, out, groups, devices, legacy, overlap, space)
     if ok:
         shutil.rmtree(base)
         log("\nAll checks passed.")

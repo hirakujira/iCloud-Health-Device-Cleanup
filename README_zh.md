@@ -141,8 +141,8 @@ python3 -B merge_health_sources.py --src backup --out merged
 
 - `Target:` 後面是不是你**現在使用**的裝置？如果不是，請用 `--iphone-target` 或 `--watch-target` 指定。
 - 下面表格列出的，是**會被合併掉**的舊裝置。裡面有不想合併的裝置嗎？有的話，用 `--keep` 排除。
-- `To legacy` 這一欄是重疊紀錄的數量，這些紀錄會放到 `Old iPhone` 或 `Old Apple Watch`。
-- `Source priority:` 是舊裝置在來源優先順序（各種資料的「資料來源與取用權」）裡的位置，有幾個會改由目標裝置接手。目標裝置本來就在列表裡的，維持它原本的位置，舊裝置那一項會被移除。
+- `To legacy` 這一欄是重疊紀錄的數量，這些紀錄會放到 `Old iPhone` 或 `Old Apple Watch`。加上 `--no-legacy` 時，這一欄叫做 `Overlap`，這些紀錄也會搬到目標裝置。
+- `Source priority:` 是舊裝置在來源優先順序（各種資料的「資料來源與取用權」）裡的位置，有幾個會改由目標裝置接手。目標裝置本來就在列表裡的，維持它原本的位置，舊裝置那一項會被移除。加上 `--highest-priority` 時，目標裝置改為接手它自己和舊裝置之中排名最前面的位置。
 
 不對就加上參數再預覽一次，直到結果正確為止。參數請看[所有參數說明](#所有參數說明)和[常見情況與範例](#常見情況與範例)。
 
@@ -232,9 +232,9 @@ python3 -B compare_health_dbs.py --before backup --after final
 
 打開「健康」App，確認：
 
-- 「來源」裡只剩目前的裝置、你用 `--keep` 保留的裝置，以及 `Old iPhone`、`Old Apple Watch`（只有在有重疊紀錄時才會出現）。
+- 「來源」裡只剩目前的裝置、你用 `--keep` 保留的裝置，以及 `Old iPhone`、`Old Apple Watch`（只有在有重疊紀錄、而且沒有用 `--no-legacy` 時才會出現）。
 - 有做步驟 5 的 `--collapse`：「裝置」頁只剩目前的 iPhone、Apple Watch 和其他配件（例如 AirPods）。沒有用 `--collapse` 的話，舊型號的硬體紀錄只要還有資料就會保留，這是正常的。
-- 挑幾種資料打開「資料來源與取用權」：目前的裝置在優先順序裡，會出現在舊裝置原本的位置；本來就在列表裡的，則維持原本的位置。
+- 挑幾種資料打開「資料來源與取用權」：目前的裝置在優先順序裡，會出現在舊裝置原本的位置；本來就在列表裡的，則維持原本的位置（用了 `--highest-priority` 的話，會在這些位置中最前面的那一個）。
 
 都沒問題後，再打開 iCloud 的「健康」同步。
 
@@ -275,6 +275,8 @@ python3 -B list_health_sources.py --src merged --hardware --devices  # 只看 iP
 | `--watch-legacy 裝置` | 選填 | 指定用哪一支舊手錶的來源存放重疊紀錄。必須是會被合併的舊手錶。 | 紀錄最多的舊手錶 |
 | `--iphone-legacy-name 名稱` | 選填 | 存放 iPhone 重疊紀錄的來源要改成什麼名字。 | `Old iPhone` |
 | `--watch-legacy-name 名稱` | 選填 | 存放手錶重疊紀錄的來源要改成什麼名字。 | `Old Apple Watch` |
+| `--no-legacy` | 選填 | 重疊紀錄也搬到目標裝置，不保留 `Old iPhone` 或 `Old Apple Watch`。有重疊的時段，步數、距離這類會累加的數值可能會**算兩次**，請先看預覽的 `Overlap` 欄。不能和 `--iphone-legacy`、`--watch-legacy` 一起用。 | 重疊紀錄放到 `Old iPhone` 或 `Old Apple Watch` |
+| `--highest-priority` | 選填 | 在每種資料的來源優先順序裡，目標裝置接手它自己和所有要合併的舊裝置之中排名最前面的位置，即使目標裝置本來排在比較後面。其他來源的相對順序不變。 | 目標裝置本來就在列表裡的，維持它原本的位置 |
 
 ### `prune_empty_devices.py`（清理「裝置」頁，選用）
 
@@ -355,7 +357,21 @@ python3 -B merge_health_sources.py --src backup --out merged --iphone-legacy-nam
 
 名稱有空格時，要用英文雙引號 `"` 包起來。
 
-### 情況 6：想重新跑一次
+### 情況 6：還在用的手錶各出現好幾次
+
+例如還原備份之後，「健康」App 可能替還在戴的手錶建立新的來源，同一支手錶就會在來源列表出現好幾次。假設手錶 A 是 lid 2、25、26，手錶 B 是 lid 3、27，最新的來源分別是 lid 26 和 lid 27，lid 1 和 4 是不想合併的 iPhone。每支手錶要併入自己最新的 lid，所以分兩次執行，每次都用 `--keep` 保留其他所有裝置：
+
+```sh
+python3 -B merge_health_sources.py --src backup --out merged_a --watch-target 26 --keep 3 --keep 27 --keep 1 --keep 4 --no-legacy --highest-priority
+python3 -B merge_health_sources.py --src merged_a --out merged --watch-target 27 --keep 26 --keep 1 --keep 4 --no-legacy --highest-priority
+```
+
+- 先預覽、套用第一行，再預覽、套用第二行。第二行讀取第一行的輸出（`--src merged_a`）。第一次合併後 lid 2 和 25 已經不存在，第二行不要再填它們。
+- `--no-legacy` 讓每支手錶只剩一個來源。請先在預覽的 `Overlap` 欄確認重疊紀錄的數量。
+- `--highest-priority` 讓每支手錶留在它在優先順序裡最前面的位置，兩支手錶之間的先後順序就不會改變。
+- 最後和原始資料比對：`python3 -B compare_health_dbs.py --before backup --after merged`。確認沒問題後，就可以刪除 `merged_a`。
+
+### 情況 7：想重新跑一次
 
 `--out` 指定的資料夾必須還不存在。想重跑時，二選一：
 
@@ -393,7 +409,7 @@ python3 -B merge_health_sources.py --src backup --out merged --iphone-legacy-nam
 - 各種數值資料的總和沒有變。
 - 每個來源的紀錄筆數符合預期。
 - 沒有紀錄指向不存在的來源或硬體紀錄。
-- 合併後的目標來源裡，不同裝置之間沒有時間重疊。
+- 合併後的目標來源裡，不同裝置之間沒有時間重疊（用 `--no-legacy` 搬進來的重疊紀錄除外）。
 - 合併時，來源的優先順序只照計畫改變。
 - SQLite 的 `quick_check` 和 `foreign_key_check` 都正常。
 - 資料庫裡用不到的空間已經還給檔案系統。
@@ -411,6 +427,7 @@ python3 -B merge_health_sources.py --src backup --out merged --iphone-legacy-nam
 
 - 沒有重疊紀錄時，就不會出現 `Old iPhone` 或 `Old Apple Watch`。
 - 想換名字，請用 `--iphone-legacy-name` 和 `--watch-legacy-name`。
+- 想把重疊紀錄也搬到目標裝置、不保留這類來源，請用 `--no-legacy`。只建議在重疊紀錄很少，或不是會累加的數值（例如每日的活動圓圈摘要、靜止心率）時使用，不然那段時間的步數、距離可能會算兩次。
 
 **這兩個來源裡是真實的健康紀錄，請不要隨便刪除。** 在「來源」或「裝置」頁按「刪除所有資料」，會永久刪除那個項目底下的所有紀錄。
 

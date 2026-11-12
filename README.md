@@ -141,8 +141,8 @@ Check these things in the output:
 
 - Is the device after `Target:` the one you **use now**? If not, choose it with `--iphone-target` or `--watch-target`.
 - The table below it lists the old devices that **will be merged**. Is there one you want to keep? If so, exclude it with `--keep`.
-- The `To legacy` column shows how many overlapping records will go to `Old iPhone` or `Old Apple Watch`.
-- `Source priority:` shows how many of the old devices' places in the source priority lists (Data Sources & Access for each data type) move to the target. Where the target is already listed, it keeps its own place and the old device's entry is dropped.
+- The `To legacy` column shows how many overlapping records will go to `Old iPhone` or `Old Apple Watch`. With `--no-legacy`, this column is called `Overlap`, and these records move to the target too.
+- `Source priority:` shows how many of the old devices' places in the source priority lists (Data Sources & Access for each data type) move to the target. Where the target is already listed, it keeps its own place and the old device's entry is dropped. With `--highest-priority`, the target takes the highest of its own and the old devices' places instead.
 
 If something is wrong, add options and preview again until it looks right. See [All options](#all-options) and [Common situations and examples](#common-situations-and-examples).
 
@@ -232,9 +232,9 @@ Use iMazing to restore the editable copy to your iPhone.
 
 Open Health and check that:
 
-- The sources list contains only your current devices, devices you kept with `--keep`, and `Old iPhone` / `Old Apple Watch` (these appear only when there were overlapping records).
+- The sources list contains only your current devices, devices you kept with `--keep`, and `Old iPhone` / `Old Apple Watch` (these appear only when there were overlapping records and you didn't use `--no-legacy`).
 - If you used `--collapse` in step 5: the Devices page contains only your current iPhone, Apple Watch, and other accessories such as AirPods. Without `--collapse`, hardware records for older models stay as long as they still have data. That is normal.
-- In Data Sources & Access for a few data types, your current devices are where your old devices used to be in the priority list, or in their own place if they were already listed.
+- In Data Sources & Access for a few data types, your current devices are where your old devices used to be in the priority list, or in their own place if they were already listed (with `--highest-priority`, in the highest of these places).
 
 Once everything looks correct, turn iCloud sync for Health back on.
 
@@ -275,6 +275,8 @@ python3 -B list_health_sources.py --src merged --hardware --devices  # only iPho
 | `--watch-legacy DEVICE` | Optional | Which old watch's source holds overlapping records. Must be an old watch that is being merged. | The old watch with the most records |
 | `--iphone-legacy-name NAME` | Optional | New name for the source holding overlapping iPhone records. | `Old iPhone` |
 | `--watch-legacy-name NAME` | Optional | New name for the source holding overlapping watch records. | `Old Apple Watch` |
+| `--no-legacy` | Optional | Move overlapping records to the target too, so no `Old iPhone` or `Old Apple Watch` source is kept. Where records overlap, cumulative values such as steps and distance may be **counted twice**; check the `Overlap` column in the preview first. Can't be combined with `--iphone-legacy` or `--watch-legacy`. | Overlapping records go to `Old iPhone` / `Old Apple Watch` |
+| `--highest-priority` | Optional | In each data type's source priority list, give the target the highest place held by the target or any old device being merged, even if the target is already listed lower. Other sources keep their relative order. | The target keeps its own place where it is already listed |
 
 ### `prune_empty_devices.py` (clean up the Devices page, optional)
 
@@ -355,7 +357,21 @@ python3 -B merge_health_sources.py --src backup --out merged --iphone-legacy-nam
 
 Wrap names that contain spaces in straight double quotes `"`.
 
-### Situation 6: Run it again
+### Situation 6: Each watch you still use appears several times
+
+For example, after a backup is restored, Health may create new sources for the watches you still wear, so the same watch appears more than once in the sources list. Suppose watch A appears as lids 2, 25, and 26, watch B as lids 3 and 27, the newest sources are lids 26 and 27, and lids 1 and 4 are iPhones you don't want to merge. Each watch should be merged into its own newest lid, so run the script twice, keeping every other device with `--keep` each time:
+
+```sh
+python3 -B merge_health_sources.py --src backup --out merged_a --watch-target 26 --keep 3 --keep 27 --keep 1 --keep 4 --no-legacy --highest-priority
+python3 -B merge_health_sources.py --src merged_a --out merged --watch-target 27 --keep 26 --keep 1 --keep 4 --no-legacy --highest-priority
+```
+
+- Preview and apply the first command, then preview and apply the second. The second command reads the output of the first (`--src merged_a`). Lids 2 and 25 no longer exist after the first run, so don't pass them to the second.
+- `--no-legacy` leaves each watch with a single source. Check the number of overlapping records in the preview's `Overlap` column first.
+- `--highest-priority` keeps each watch at its highest place in the priority lists, so the order between the two watches doesn't change.
+- Finally, compare with the original: `python3 -B compare_health_dbs.py --before backup --after merged`. Once everything is fine, you can delete `merged_a`.
+
+### Situation 7: Run it again
 
 The `--out` directory must not already exist. To run again, either:
 
@@ -393,7 +409,7 @@ Every `--apply` run checks these automatically:
 - Totals for each type of numeric data are unchanged.
 - Each source has the expected number of records.
 - No records point to missing sources or hardware records.
-- Within the merged target source, records from different devices don't overlap in time.
+- Within the merged target source, records from different devices don't overlap in time, except overlapping records moved there with `--no-legacy`.
 - When merging, the source priority order changed only as planned.
 - SQLite `quick_check` and `foreign_key_check` pass.
 - Unused space inside the databases was returned to the file system.
@@ -411,6 +427,7 @@ So the script leaves these overlapping records in the old device's original sour
 
 - If there are no overlapping records, `Old iPhone` and `Old Apple Watch` don't appear.
 - To use different names, pass `--iphone-legacy-name` and `--watch-legacy-name`.
+- To move overlapping records to the target too and keep no such source, pass `--no-legacy`. Use it only when there are few overlapping records or they aren't cumulative values, such as daily activity ring summaries or resting heart rate; otherwise steps and distance for those periods may be counted twice.
 
 **These sources contain real health records. Don't delete them casually.** Choosing Delete All Data on a source or device permanently deletes every record under it.
 
